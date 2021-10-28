@@ -3,6 +3,8 @@
 # MCP23017 multi I/O Control on a Raspberry Pi With I2C
 This is a Raspberry Pi driver for controlling a MCP23017 I/O chip over I2C.
 
+Previous topic: [Step 3: Setting up Home Assistant native on the Raspberry Pi.](https://github.com/JurgenVanGorp/Step3-Home-Assistant-on-Raspberry-Pi-Native)
+
 ## Introduction
 
 An MCP23017 is a digital IC with 16 controllable Input-Output pins. The chip has three address bit that can be hard configured to one or zero. This allows for connecting up to eight MCP23017 ICs on the same I2C bus, allowing control of up to 128 input-output pins. The control can be done with the I2C port of e.g. a Raspberry Pi.
@@ -111,4 +113,4 @@ core_freq=250
 
 
 
-
+Next topic: [Step 5: Controlling the MCP23017 from within Home-Assistant.](https://github.com/JurgenVanGorp/Step5-MCP23017-multi-I-O-Control-with-Raspberry-Pi-and-Home-Assistant)
