@@ -1,22 +1,24 @@
 #!/usr/bin/env python
 """
 MCP23017 Control Service. 
+A service that acts as an interface between (e.g. Home Assistant) clients and the I2C bus on a Raspberry Pi.
+Author: find me on codeproject.com --> JurgenVanGorp
 """
 import traceback
-import linecache
 import os
+import sys
 import time
-import socket
-import selectors
-import types
 import logging
+import redis
 from logging.handlers import RotatingFileHandler
 import xml.etree.ElementTree as ET
-from datetime import date, datetime
+from datetime import datetime
 from smbus2 import SMBus
 from threading import Thread, Lock
 
-### USER DEFINED CONSTANTS ##############################################################
+###
+### USER EDITABLE CONSTANTS #####################################################################
+###
 # CONFIGURATION_FILE is the name of the configuration file that will be written on the home
 # location of the current user when running the program. The configuration file is read at
 # the first start of the program, e.g. after a power failure, to make sure that the 
@@ -27,38 +29,29 @@ from threading import Thread, Lock
 # CONFIGURATION_FILE = ".mcp23017control.xml" --> Default value
 # CONFIGURATION_FILE = ''  --> Set to empty string to disable this feature.
 CONFIGURATION_FILE = ".mcp23017server.xml"
-### You can change these constants to your own flavour
-# TCP_IP is the port that the server is responding to.
-# E.g. TCP_IP = 127.0.0.1 --> if this application is only used locally.
-# E.g. TCP_IP = 192.168.1.200 --> or another .xxx bit at the end if this is your local network
-# E.g. TCP_IP = '' --> (empty string) means that all active IPv4 ports are used. Also useable for DHCP
-TCP_IP = ''
-# TCP_PORT is the port that this program will listen to
-# Please mind that numbers below 1024 are typically used by the system, so reach higher
-TCP_PORT = 8888
-# BUFFER_SIZE is maximum buffer that will be read. Default is 1024
-BUFFER_SIZE = 1024       # Network connector buffer size
-# If ports are already opened, the software will wait for the port to be opened every 
-# second. It will retry this CONNECTION_ATTEMPTS times every RETRY_DELAY seconds.
-CONNECTION_ATTEMPTS = 10 # If port is blocked, number of retries to claim port
-RETRY_DELAY = 6          # Number of seconds to wait before retrying connection
-# Give status reports, i.e. run the software in high communication mode?
-# Verbose = 0 --> run quiet
-# Verbose = 1 --> give details on user actions and errors only
-# Verbose = 2 --> Babble, babble, babble ...
-VERBOSE = 0
+
+# LOG_LEVEL determines the level of logging output into the system logs.
+# Log Level = 0 --> No logging at all
+# Log Level = 1 --> (DEFAULT) give details on application status and errors only
+# Log Level = 2 --> Babble, babble, babble ...
+# Remark that the dot in front of the filename makes it invisible. the file is saved 
+# in your home folder.
+LOG_LEVEL = 1
+LOG_FILE = '.mcp23017server.log'
+
 # DEMO_MODE_ONLY = True --> Print on screen what would happen on the I2C bus. Use this
 #       when e.g. running the program manually (not as a service) to verify operation for
 #       your own software.
 # DEMO_MODE_ONLY = False --> Actually write the values on the I2C bus
 DEMO_MODE_ONLY = False
+
 # Acceptable Commands for controlling the I2C bus
 # These are the commands you need to use to control the DIR register of the MCP23017, or
 # for setting and clearing pins.
 GETDIRBIT = "GETDBIT"         # Read the specific IO pin dir value (1 = output)
 GETDIRREGISTER = "GETDIRREG"  # Read the full DIR register (low:1 or high:2)
-SETDIRBIT = "SETDBIT"         # Set DIR pin command
-CLEARDIRBIT = "CLRDBIT"       # Clear DIR pin command
+SETDIRBIT = "SETDBIT"         # Set DIR pin to INPUT (1)
+CLEARDIRBIT = "CLRDBIT"       # Clear DIR pin command to OUTPUT (0)
 GETIOPIN = "GETPIN"           # Read the specific IO pin value
 GETIOREGISTER = "GETIOREG"    # Read the full IO register (low:1 or high:2)
 SETDATAPIN = "SETPIN"         # Set pin to High
@@ -66,21 +59,32 @@ CLEARDATAPIN = "CLRPIN"       # Set pin to low
 TOGGLEPIN = "TOGGLE"          # Toggle a pin to the "other" value for TOGGLEDELAY time
                               # If a pin is high, it will be set to low, and vice versa
 TOGGLEDELAY = 0.1             # Seconds that the pin will be toggled. Default = 100 msec
-# LOG_LEVEL determines the level of logging output into the system logs.
-# Log Level = 0 --> No logging at all
-# Log Level = 1 --> give details on application status and errors only
-# Log Level = 2 --> Babble, babble, babble ...
-# Remark that the dot in front of the filename makes it invisible. the file is saved 
-# in your home folder.
-LOG_LEVEL = 1
-LOG_FILE = '.mcp23017server.log'
-# Number of seconds to wait before writing an "Alive and Kicking" message in the log
-# Set value to zero to disable this feature.
-# Suggested debugging value is 60 (every minute)
-# Default value is 0, in order to limit the number of writes on an SSD card.
-AM_ALIVE_TIMER = 0
 
-### PROGRAM CONSTANTS ####################################################################
+# The COMMAND_TIMEOUT value is the maximum time (in seconds) that is allowed between pushing a  
+# button and the action that must follow. This is done to protect you from delayed actions 
+# whenever the I2C bus is heavily used, or the CPU is overloaded. If you e.g. push a button, 
+# and the I2C is too busy with other commands, the push-button command is ignored when  
+# COMMAND_TIMEOUT seconds have passed. Typically you would push the button again if nothing 
+# happens after one or two seconds. If both commands are stored, the light is switched on and
+# immediately switched off again.
+# Recommended minimum value one or two seconds
+# COMMAND_TIMEOUT = 2
+# Recommended maximum value is 10 seconds. Feel free to set higher values, but be prepared that 
+# you can can experience strange behaviour if there is a lot of latency on the bus.
+COMMAND_TIMEOUT = 1.5
+
+# Communications between Clients and the server happen through a Redis in-memory database
+# so to limit the number of writes on the (SSD or microSD) storage. For larger implementations
+# dozens to hundreds of requests can happen per second. Writing to disk would slow down the 
+# process, and may damage the storage.
+# Make sure to have Redis installed in the proper locations, e.g. also in the virtual python
+# environments. The default is that Redis is installed on localhost (127.0.0.1).
+REDIS_HOST = 'localhost'
+REDIS_PORT = 6379
+
+###
+### PROGRAM INTERNAL CONSTANTS ####################################################################
+###
 # Software version
 VERSION = '0.9.0'
 # MCP23017 default parameters are that you can address the devices in the 0x20 to 0x2F 
@@ -94,335 +98,340 @@ MAXPIN = 0x10            # Maximum pin on the MCP23017, +1 (i.e. must be lower t
 # the thread will crash and die, and is expected to be restarted as a service
 WATCHDOG_TIMEOUT = 5
 ### Define MCP23017 specific registers
-IODIRA = 0x00    # IO direction A - 1= input 0 = output
-IODIRB = 0x01    # IO direction B - 1= input 0 = output    
-IPOLA = 0x02     # Input polarity A
-IPOLB = 0x03     # Input polarity B
-GPINTENA = 0x04  # Interrupt-onchange A
-GPINTENB = 0x05  # Interrupt-onchange B
-DEFVALA = 0x06   # Default value for port A
-DEFVALB = 0x07   # Default value for port B
-INTCONA = 0x08   # Interrupt control register for port A
-INTCONB = 0x09   # Interrupt control register for port B
-IOCON = 0x0A     # Configuration register
-GPPUA = 0x0C     # Pull-up resistors for port A
-GPPUB = 0x0D     # Pull-up resistors for port B
-INTFA = 0x0E     # Interrupt condition for port A
-INTFB = 0x0F     # Interrupt condition for port B
-INTCAPA = 0x10   # Interrupt capture for port A
-INTCAPB = 0x11   # Interrupt capture for port B
-GPIOA = 0x12     # Data port A
-GPIOB = 0x13     # Data port B
-OLATA = 0x14     # Output latches A
-OLATB = 0x15     # Output latches B
-ALLOUTPUTS = "0xff" # Initial value of DIR register if not yet used
+IODIRA = 0x00            # IO direction A - 1= input 0 = output
+IODIRB = 0x01            # IO direction B - 1= input 0 = output    
+IPOLA = 0x02             # Input polarity A
+IPOLB = 0x03             # Input polarity B
+GPINTENA = 0x04          # Interrupt-onchange A
+GPINTENB = 0x05          # Interrupt-onchange B
+DEFVALA = 0x06           # Default value for port A
+DEFVALB = 0x07           # Default value for port B
+INTCONA = 0x08           # Interrupt control register for port A
+INTCONB = 0x09           # Interrupt control register for port B
+IOCON = 0x0A             # Configuration register
+GPPUA = 0x0C             # Pull-up resistors for port A
+GPPUB = 0x0D             # Pull-up resistors for port B
+INTFA = 0x0E             # Interrupt condition for port A
+INTFB = 0x0F             # Interrupt condition for port B
+INTCAPA = 0x10           # Interrupt capture for port A
+INTCAPB = 0x11           # Interrupt capture for port B
+GPIOA = 0x12             # Data port A
+GPIOB = 0x13             # Data port B
+OLATA = 0x14             # Output latches A
+OLATB = 0x15             # Output latches B
+ALLOUTPUTS = "0xff"      # Initial value of DIR register if not yet used
+
+# The dummy command is sent during initialization of the database and verification if
+# the database can be written to. Dummy commands are not processed.
+DUMMY_COMMAND = 'dummycommand'
+
 ### END OF CONSTANTS SECTION #########################################################
+
+class databaseHandler():
+    """
+    A class for communicating between the server and clients through a shared memory Redis
+    database. Two databases are initiated (or used) for communicating from client to 
+    server (0) or from server to client (1).
+    """
+    def __init__(self, the_log):
+        # Commands have id   datetime.now().strftime("%d-%b-%Y %H:%M:%S.%f")}, i.e. the primary key is a timestamp. 
+        # Commands given at exactly the same time, will overwrite each other, but this is not expected to happen.
+        # The commands table is then formatted as (all fields are TEXT, even if formatted as "0xff" !!)
+        # id, command TEXT, boardnr TEXT DEFAULT '0x00', pinnr TEXT DEFAULT '0x00', datavalue TEXT DEFAULT '0x00'
+        self._commands = None
+        # Responses have id   datetime.now().strftime("%d-%b-%Y %H:%M:%S.%f")}, i.e. the primary key is a timestamp. 
+        # The Responses table is then formatted as (all fields are TEXT, even if formatted as "0xff" !!)
+        # id, command_id TEXT, datavalue TEXT, response TEXT
+        self._responses = None
+        # Copy logfile to local
+        self._log = the_log
+        # Initialize database
+        self.OpenAndVerifyDatabase()
+
+    def OpenAndVerifyDatabase(self):
+        """
+        Opens an existing database, or creates a new one if not yet existing. Then 
+        verifies if the Redis database is accessible.
+        """
+        # First try to open the database itself.
+        try:
+            # Open the shared memory databases.
+            # Redis database [0] is for commands that are sent from the clients to the server.
+            nowTrying = "Commands"
+            self._log.info(1, "Opening Commands database.")
+            self._commands = redis.StrictRedis(host=REDIS_HOST, port=REDIS_PORT, db=0)
+            # Redis database [1] is for responses from the server so the clients.
+            nowTrying = "Responses"
+            self._log.info(1, "Opening Responses database.")
+            self._responses = redis.StrictRedis(host=REDIS_HOST, port=REDIS_PORT, db=1)
+        except OSError as err:
+            # Capturing OS error.
+            self._log.error(1, "FATAL OS ERROR. Could not open [{}] database. This program is now exiting with error [{}].".format(nowTrying, err))
+            # If a database cannot be opened, this program makes no sense, so exiting.
+            sys.exit(1)
+        except:
+            # Capturing all other errors.
+            self._log.error(1, "FATAL UNEXPECTED ERROR. Could not open [{}] database. This program is now exiting with error [{}].".format(nowTrying, sys.exc_info()[0]))
+            # If a database cannot be opened, this program makes no sense, so exiting.
+            sys.exit(1)
+        
+        # Do a dummy write to the Commands database, as verification that the database is fully up and running.
+        try:
+            # Remember: fields are: id, command TEXT, boardnr TEXT DEFAULT '0x00', pinnr TEXT DEFAULT '0x00', datavalue TEXT DEFAULT '0x00'
+            self._log.info(2, "Verifying Commands database with dummy write.")
+            id =  (datetime.now() - datetime.utcfromtimestamp(0)).total_seconds()
+            datamap = {'command':DUMMY_COMMAND, 'boardnr':0x00, 'pinnr':0xff, 'datavalue':0x00}
+            # Write the info to the Redis database
+            self._commands.hset(id, None, None, datamap)
+            # Set expiration to a short 1 second, after which Redis will automatically delete the record
+            self._commands.expire(id, 1)
+        except:
+            # Capturing all errors.
+            self._log.error(1, "FATAL UNEXPECTED ERROR. Could not read and/or write the [Commands] database. This program is now exiting with error [{}].".format(sys.exc_info()[0]))
+            # If a database cannot be processed, this program makes no sense, so exiting.
+            sys.exit(1)
+
+        # Next, do a dummy write to the Responses database, as verification that the database is fully up and running.
+        try:
+            # Remember: fields are: id, command_id TEXT, datavalue TEXT, response TEXT
+            self._log.info(2, "Verifying Responses database with dummy write.")
+            id =  (datetime.now() - datetime.utcfromtimestamp(0)).total_seconds()
+            datamap = {'datavalue':0x00, 'response':'OK'}
+            # Write the info to the Redis database
+            self._responses.hset(id, None, None, datamap)
+            # Set expiration to a short 1 second, after which Redis will automatically delete the record
+            self._responses.expire(id, 1)
+        except:
+            # Capturing all errors.
+            self._log.error(1, "FATAL UNEXPECTED ERROR. Could not read and/or write the [Responses] database. This program is now exiting with error [{}].".format(sys.exc_info()[0]))
+            # If a database cannot be processed, this program makes no sense, so exiting.
+            sys.exit(1)
+
+    def GetNextCommand(self):
+        """
+        Fetches the oldest command - that has not expired - from the commands buffer.
+        """
+        # Get all keys from the Commands table
+        rkeys = self._commands.keys("*")
+        # Key IDs are based on the timestamp, so sorting will pick the oldest first
+        rkeys.sort()
+        # Check if there are keys available
+        if len(rkeys) > 0:
+            # Get the first key from the list
+            id = rkeys[0]
+            # Read the Redis data
+            datarecord = self._commands.hgetall(id)
+            # We have the data, now delete the record (don't wait for the time-out)
+            self._commands.delete(id)
+            # pull the data from the record, and do proper conversions.
+            # Correct potential dirty entries, to avoid that the software crashes on poor data.
+            try:
+                return_id = float(id.decode('ascii'))
+            except:
+                return_id = 0
+
+            try:
+                command =  datarecord[b'command'].decode('ascii')
+            except:
+                command = ''
+
+            try:
+                boardnr =  datarecord[b'boardnr'].decode('ascii')
+            except:
+                boardnr = 0x00
+
+            try:
+                pinnr =  datarecord[b'pinnr'].decode('ascii')
+            except:
+                pinnr = 0x00
+
+            try:
+                datavalue =  datarecord[b'datavalue'].decode('ascii')
+            except:
+                datavalue = 0x00
+            # return the data read
+            return(return_id, command, boardnr, pinnr, datavalue)
+        else:
+            # return a zero record if nothing was received
+            return (0, '', 0x00, 0x00, 0x00)
+
+    def ReturnResponse(self, id, value, response):
+        """
+        Returns the data value to the client through the Responses buffer. 
+        Also does the house-keeping, deleting all old entries that would still exist.
+        """
+        # Remember: fields are : id, command_id TEXT, datavalue TEXT, response TEXT
+        # The Response ID is the same as the Command ID, making it easy for the client to capture the data.
+        mapping = {'command_id':id, 'datavalue':value, 'response':response}
+        self._responses.hset(id, None, None, mapping)
+        # set auto-delete time-out in the Redis database. Add several seconds grace period, and round to integer values
+        self._responses.expire(id, round(COMMAND_TIMEOUT + 2))
 
 class mcp23017broker():
     """
-    A class that is a man in the middle between network communications and I2C attached devices.
+    A class that is a man in the middle between external clients and I2C attached devices.
+    This class is based on a shared memory database.
     """
     def __init__(self, the_log, i2chandler, xmldata = None):
         # Copy logfile to local
         self._log = the_log
-        # Mutex to make sure nobody else is messing with the I2C bus
+        # Create a handler for the I2C communications
         self._i2chandler = i2chandler
         # Inherit the xmldata communication
         self._xmldata = xmldata
-        # selector for capturing events
-        self._log.info(2, "Setting up a Selector.")
-        self._sel = selectors.DefaultSelector()
-        # Program watchdog and error flags (used for crashing the project)
-        self._log.info(2, "Initializing Watchdog.")
-        self._watchdog_thread1 = datetime.now()
-        self._error_state = ""
+        # Create a data pipe to the in-memory database
+        self._datapipe = databaseHandler(self._log)
 
-    @property
-    def error_state(self):
-        return self._error_state
-    
-    @property
-    def watchdog_CommandReceiver(self):
-        return self._watchdog_thread1
-    
-    def SetupThreads(self):
-        # Create parallel thread for listening to the network on port TCP_PORT
-        self.thread1 = Thread(target = self.CommandReceiver, args = [TCP_PORT, BUFFER_SIZE], daemon = True)
-        self._log.info(2, "Starting Command Receiver thread")
-        self.thread1.start()
-
-    def CommandReceiver(self, whichport = TCP_PORT, buffersize = BUFFER_SIZE):
-        """
-        Receives commands given over the network, does initial verification and executes command.
-        """
-        # Network communication socket
-        self._lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
-        binding_attempts = 0
-        bind_successful = False
-        # Try CONNECTION_ATTEMPTS of times to listen on port TCP_PORT
-        while binding_attempts < CONNECTION_ATTEMPTS:
-            self._watchdog_thread1 = datetime.now()
-            try:
-                self._log.info(2, "Binding port {} to TCP address {}. Tried {} time(s). ".format(TCP_PORT, TCP_IP, binding_attempts))
-                self._lsock.bind((TCP_IP, TCP_PORT))
-                self._lsock.listen()
-                binding_attempts = CONNECTION_ATTEMPTS + 1
-                bind_successful = True
-            except:
-                # If connection unsuccessful, try again after one second.
-                self._log.error(2, "Could not bind port {} to TCP address {}. Tried {} time(s). ".format(TCP_PORT, TCP_IP, binding_attempts))
-                if VERBOSE == 2:
-                    print(traceback.format_exc())
-                time.sleep(RETRY_DELAY)
-                binding_attempts += 1
-
-        # Stop thread if binding was unsuccessful
-        if not(bind_successful):
-            self._log.error(1, "Could not bind TCP/IP port {}. I tried {} times. Giving up. ".format(TCP_PORT, CONNECTION_ATTEMPTS))
-            self._error_state = "Could not bind TCP/IP port {}. I tried {} times. Giving up. ".format(TCP_PORT, CONNECTION_ATTEMPTS)
-        else:
-            if VERBOSE == 2:
-                print("Listening on: ({}, {}).".format(whichport, buffersize))
-                self._log.info(2, "Listening on: ({}, {}). ".format(whichport, buffersize))
-            # Continue operations while listening on the port. This is done to allow parallel connections.
-            self._lsock.setblocking(False)
-            # Enable reading from the network socket
-            self._sel.register(self._lsock, selectors.EVENT_READ, data=None)
-            try:
-                while True:
-                    self._watchdog_thread1 = datetime.now()
-                    # Continuously process data that is coming in on the network socket.
-                    # the timeout is set to keep polling the watchdog timer
-                    events = self._sel.select(timeout=0.5)
-                    for key, mask in events:
-                        if key.data is None:
-                            # Create new data socket
-                            self.accept_connection(key.fileobj)
-                        else:
-                            # Process data
-                            self.service_connection(key, mask)
-            except Exception as err:
-                # Collect error data
-                error_string = traceback.format_exc()
-                self._log.error(1, "Error condition met: {}".format(error_string))
-                if VERBOSE == 1:
-                    print(error_string)
-                if self._xmldata is not None:
-                    self._xmldata.DeleteKey(board_id)
-                self._error_state += "When processing network socket: {}. ".format(error_string)
-            finally:
-                self._sel.close()
-
-    def accept_connection(self, sock):
-        """
-        Accepts a new connection from a new network client
-        """
-        # Get the client information
-        connion, addrss = sock.accept()
-        if VERBOSE == 2:
-            print("Accepted incoming connection from: {}".format(addrss))
-        self._log.info(2, "Accepted incoming connection from: {}".format(addrss))
-        # Incoming connections are fall-through, i.e. don't block other connections when processing data
-        connion.setblocking(False)
-        # Set up a new selector that will catch all events coming from the client
-        events = selectors.EVENT_READ | selectors.EVENT_WRITE
-        # Get the connection data information
-        indata = types.SimpleNamespace(addr=addrss, inb=b"", outb=b"")
-        # Register the selector, and connect it to the incoming events
-        self._log.info(2, "Registering the connection. ")
-        self._sel.register(connion, events, data=indata)
-
-    def service_connection(self, key, mask):
+    def service_commands(self):
         """
         Process incoming data coming from the connected clients (one at the time).
-        Properly formatted commands are processed immediately.
+        Properly formatted commands are processed immediately, or as separate threads (for long-lasting commands).
         """
-        # Get socket info and data from the client
-        sock = key.fileobj
-        data = key.data
-        # If receive buffer was hit
-        if mask & selectors.EVENT_READ:
-            # Pull the data from the socket
-            recv_data = sock.recv(BUFFER_SIZE)
-            if recv_data:
-                # Add data to the output buffer.
-                data.outb += recv_data
-            else:
-                # If data was empty, the client has closed the connection. So, close here also.
-                if VERBOSE == 2:
-                    print("Closing connection to: {}".format(data.addr))
-                self._log.info(2, "Closing connection to: {}".format(data.addr))
-                self._sel.unregister(sock)
-                sock.close()
-
-        # If send buffer was hit, i.e. when data is complete in the buffer
-        if mask & selectors.EVENT_WRITE:
-            # Verify if there is truly data in the buffer
-            if data.outb:
-                # Data is expected to be in the format: Command [space] Board_ID [space] Pin-Number or dummy value
-                # Split the command on the spaces
-                command_list = data.outb.split()
-                self._log.info(2, "Processing command: {}".format(command_list))
-
-                # Start the reply error with an empty error
-                self._return_error = ""
-
-                # First verify if truly three items given, otherwise it's an error already
-                if len(command_list) != 3:
-                    self._return_error += "Error: commands must have 3 fields: (command, board, data). "
-                    self._log.info(2, "Error: commands must have 3 fields: (command, board, data).")
-                else:
-                    the_command = command_list[0].decode('utf-8')
-                    the_board = command_list[1].decode('utf-8')
-                    the_value = command_list[2].decode('utf-8')
-                    # Using a try here, because the command could also be very dirty.
-                    set_expectation = "Error: first command must be one of the following {}, {}, {}, {}, {}, {}, {}, {}, {}. ".format(GETDIRBIT, GETDIRREGISTER, SETDIRBIT, CLEARDIRBIT, GETIOPIN, GETIOREGISTER, SETDATAPIN, CLEARDATAPIN, TOGGLEPIN)
-                    try:
-                        if the_command not in {GETIOPIN, SETDIRBIT, CLEARDIRBIT, GETDIRBIT, SETDATAPIN, CLEARDATAPIN, GETIOREGISTER, GETDIRREGISTER, TOGGLEPIN}:
-                            self._return_error += set_expectation
-                            self._log.info(2, set_expectation)
-                    except:
-                        # Exception can happen if the_command is something _very_ weird, so need to capture that too without crashing
-                        if VERBOSE == 2:
-                            print(traceback.format_exc())
+        # Fetch a command from the pipe
+        command_list = self._datapipe.GetNextCommand()
+        # a command id larger than 0 is a successful read. Command ID zero is returned if the pipe is empty.
+        if command_list[0] > 0:
+            self._log.info(2, "Received command with id [{}]: [{}] for board [{}] and pin [{}].".format(str(command_list[0]), command_list[1], str(command_list[2]), str(command_list[3])))
+            # Start the reply error with an empty error
+            self._return_error = ""
+            # retrieve commands from the pipe
+            command_id = command_list[0]
+            the_command = command_list[1]
+            the_board = command_list[2]
+            the_pin = command_list[3]
+            # During initialization a dummy command is sent. This is also done by the clients, so make sure that these commands are thrown away.
+            if the_command != DUMMY_COMMAND:
+                # Inputs can have different formats, also numerical as hexadecimal (e.g. '0x0f'). Convert where necessary.
+                if(isinstance(the_board,str)):
+                    if 'x' in the_board:
+                        the_board = int(the_board, 16)
+                    else:
+                        the_board = int(the_board, 10)
+                the_value = command_list[3]
+                if(isinstance(the_value,str)):
+                    if 'x' in the_value:
+                        the_value = int(the_value, 16)
+                    else:
+                        the_value = int(the_value, 10)
+                # Describe what we are expecting on the bus.
+                set_expectation = "Error: first command must be one of the following {}, {}, {}, {}, {}, {}, {}, {}, {}. ".format(GETDIRBIT, GETDIRREGISTER, SETDIRBIT, CLEARDIRBIT, GETIOPIN, GETIOREGISTER, SETDATAPIN, CLEARDATAPIN, TOGGLEPIN)
+                # Using a try here, because the command could also be very, very dirty.
+                try:
+                    if the_command not in {GETIOPIN, SETDIRBIT, CLEARDIRBIT, GETDIRBIT, SETDATAPIN, CLEARDATAPIN, GETIOREGISTER, GETDIRREGISTER, TOGGLEPIN}:
                         self._return_error += set_expectation
                         self._log.info(2, set_expectation)
+                except:
+                    # Exception can happen if the_command is something _very_ weird, so need to capture that too without crashing
+                    self._return_error += set_expectation
+                    self._log.info(2, set_expectation)
+                
+                # Test if Board ID is a hex number within allowed Board IDs
+                try:
+                    if not(the_board in range(MINBOARDID, MAXBOARDID)):
+                        self._return_error += "Error: Board ID not in range [0x{:0{}X}, 0x{:0{}X}]. ".format(MINBOARDID, 2, MAXBOARDID-1, 2)
+                        self._log.info(2, "Error: Board ID not in range [0x{:0{}X}, 0x{:0{}X}]. ".format(MINBOARDID, 2, MAXBOARDID-1, 2))
+                except:
+                    # print error message to the systemctl log file
+                    if LOG_LEVEL == 2:
+                        print(traceback.format_exc())
+                    self._return_error += "Error: wrongly formatted register. "
+                    self._log.info(2, "Error: wrongly formatted register. ")
 
-                    # Test if Board ID is a hex number within allowed Board IDs
-                    try:
-                        test_value = int(the_board, 16)
-                        if not(test_value in range(MINBOARDID, MAXBOARDID)):
-                            self._return_error += "Error: Board ID not in range [0x{:0{}X}, 0x{:0{}X}]. ".format(MINBOARDID, 2, MAXBOARDID-1, 2)
-                            self._log.info(2, "Error: Board ID not in range [0x{:0{}X}, 0x{:0{}X}]. ".format(MINBOARDID, 2, MAXBOARDID-1, 2))
-                    except:
-                        if VERBOSE == 2:
-                            print(traceback.format_exc())
-                        self._return_error += "Error: wrongly formatted register. "
-                        self._log.info(2, "Error: wrongly formatted register. ")
-
-                    # Test if the pin number is a hex number from 0x00 to 0x0f (included)
-                    try:
-                        test_value = int(the_value, 16)
-                        if not(test_value in range(MINPIN, MAXPIN)):
-                            self._return_error += "Error: registervalue not in range [0x{:0{}X}, 0x{:0{}X}]. ".format(MINPIN, 2, MAXPIN, 2)
-                            self._log.info(2, "Error: registervalue not in range [0x{:0{}X}, 0x{:0{}X}]. ".format(MINPIN, 2, MAXPIN, 2))
-                    except:
-                        if VERBOSE == 2:
-                            print(traceback.format_exc())
-                        self._return_error += "Error: wrongly formatted data byte. "
-                        self._log.info(2, "Error: wrongly formatted data byte. ")
-
+                # Test if the pin number is a hex number from 0x00 to 0x0f (included)
+                try:
+                    if not(the_value in range(MINPIN, MAXPIN)):
+                        self._return_error += "Error: registervalue not in range [0x{:0{}X}, 0x{:0{}X}]. ".format(MINPIN, 2, MAXPIN, 2)
+                        self._log.info(2, "Error: registervalue not in range [0x{:0{}X}, 0x{:0{}X}]. ".format(MINPIN, 2, MAXPIN, 2))
+                except:
+                    # print error message to the systemctl log file
+                    if LOG_LEVEL == 2:
+                        print(traceback.format_exc())
+                    self._return_error += "Error: wrongly formatted data byte. "
+                    self._log.info(2, "Error: wrongly formatted data byte. ")
+                
+                # All checks done, continue processing if no errors were found.
                 if self._return_error == '':
-                    if VERBOSE == 2:
+                    # print status message to the systemctl log file
+                    if LOG_LEVEL == 2:
                         print("Processing: {}, {}, {}.".format(the_command, the_board, the_value))
                     # Command format looks good, now process it and get the result back
-                    return_data = self.ProcessCommand([the_command, the_board, the_value])
-                    # Send an "OK" if no error
-                    sock.send(("{} OK\n".format(return_data)).strip().encode('utf-8'))
+                    return_data = self.ProcessCommand(the_command, the_board, the_value)
+                    # Send an "OK" back, since we didn't find an error.
+                    self._datapipe.ReturnResponse(command_id, return_data, 'OK')
                     self._log.debug(2, "Action result: {} OK\n".format(return_data))
                 else:
-                    if VERBOSE == 1:
+                    # print error message to the systemctl log file
+                    if LOG_LEVEL > 0:
                         print(self._return_error)
-                    # Send back an error on the Socket if the command was not properly formatted. Do nothing else
-                    sock.send(("{}\n".format(self._return_error)).encode('utf-8'))
-                
-                # Reset the outbound buffer after processing the command.
-                data.outb = ''.encode('utf-8')
+                    # Send back an error if the command was not properly formatted. Do nothing else
+                    self._datapipe.ReturnResponse(command_id, '0x00', self._return_error)
 
-    def ProcessCommand(self, command_data):
+    def ProcessCommand(self, task, board_id, pin):
         """
         Identifies command and processes the command on the I2C bus.
         """
-        # Break command into pieces
-        task = command_data[0]
-        board_id = command_data[1]
-        pin = command_data[2]
-        if VERBOSE == 1:
-            print("Processing command [{}] on board [{}] for pin [{}]".format(task, board_id,pin))
-        self._log.info(2, "Processing command [{}] on board [{}] for pin [{}]".format(task, board_id,pin))
-        # Process I2C bus commands based
+        # Process I2C bus commands based on board ID and Pin nr
         return_byte = ""
         try:
             if task == GETDIRBIT:
+                self._i2chandler.WaitForPinToBeReleased(board_id, pin, False)
                 return_byte = '0x{:0{}X}'.format(self._i2chandler.GetI2CDirPin(board_id, pin),2)
-                self._log.info(2, "Received byte [{}] from pin [{}] on board [{}] through GetI2CDirPin".format(return_byte, board_id, pin))
+                self._log.info(2, "Received byte [{}] from pin [{}] on board [{}] through GetI2CDirPin".format(return_byte, pin, board_id))
             elif task == GETDIRREGISTER:
+                self._i2chandler.WaitForPinToBeReleased(board_id, pin, False)
                 return_byte = '0x{:0{}X}'.format(self._i2chandler.GetI2CDirRegister(board_id, pin),2)
-                self._log.info(2, "Received byte [{}] from pin [{}] on board [{}] through GetI2CDirRegister".format(return_byte, board_id, pin))
+                self._log.info(2, "Received byte [{}] from pin [{}] on board [{}] through GetI2CDirRegister".format(return_byte, pin, board_id))
             elif task == SETDIRBIT:
                 return_byte = ""
                 self._i2chandler.SetI2CDirPin(board_id, pin)
-                self._log.info(2, "Setting DIR bit [{}] on board [{}] through SetI2CDirPin".format(board_id, pin))
+                self._log.info(2, "Setting DIR bit [{}] on board [{}] through SetI2CDirPin".format(pin, board_id))
                 if self._xmldata is not None:
+                    self._i2chandler.WaitForPinToBeReleased(board_id, pin, False)
                     self._xmldata.set_board_pin(board_id, pin)
             elif task == CLEARDIRBIT:
                 return_byte = ""
                 self._i2chandler.ClearI2CDirPin(board_id, pin)
-                self._log.info(2, "Clearing DIR bit [{}] on board [{}] through ClearI2CDirPin".format(board_id, pin))
+                self._log.info(2, "Clearing DIR bit [{}] on board [{}] through ClearI2CDirPin".format(pin, board_id))
                 if self._xmldata is not None:
+                    self._i2chandler.WaitForPinToBeReleased(board_id, pin, False)
                     self._xmldata.clear_board_pin(board_id, pin)
             elif task == GETIOPIN:
+                self._i2chandler.WaitForPinToBeReleased(board_id, pin, False)
                 return_byte = '0x{:0{}X}'.format(self._i2chandler.GetI2CPin(board_id, pin),2)
-                self._log.info(2, "Received byte [{}] from pin [{}] on board [{}] through GetI2CPin".format(return_byte, board_id, pin))
+                self._log.info(2, "Received byte [{}] from pin [{}] on board [{}] through GetI2CPin".format(return_byte, pin, board_id))
             elif task == GETIOREGISTER:
+                self._i2chandler.WaitForPinToBeReleased(board_id, pin, False)
                 return_byte = '0x{:0{}X}'.format(self._i2chandler.GetI2CIORegister(board_id, pin),2)
-                self._log.info(2, "Received Register [{}] from pin [{}] on board [{}] through GetI2CIORegister".format(return_byte, board_id, pin))
+                self._log.info(2, "Received Register [{}] from pin [{}] on board [{}] through GetI2CIORegister".format(return_byte, pin, board_id))
             elif task == SETDATAPIN:
                 return_byte = ""
+                self._i2chandler.WaitForPinToBeReleased(board_id, pin, False)
                 self._i2chandler.SetI2CPin(board_id, pin)
-                self._log.info(2, "Setting bit [{}] on board [{}] through SetI2CPin".format(board_id, pin))
+                self._log.info(2, "Setting bit [{}] on board [{}] through SetI2CPin".format(pin, board_id))
             elif task == CLEARDATAPIN:
                 return_byte = ""
+                self._i2chandler.WaitForPinToBeReleased(board_id, pin, False)
                 self._i2chandler.ClearI2CPin(board_id, pin)
-                self._log.info(2, "Clearing bit [{}] on board [{}] through ClearI2CPin".format(board_id, pin))
+                self._log.info(2, "Clearing bit [{}] on board [{}] through ClearI2CPin".format(pin, board_id))
             elif task == TOGGLEPIN:
                 return_byte = ""
                 self._i2chandler.ToggleI2CPin(board_id, pin)
-                self._log.info(2, "Toggling bit [{}] on board [{}] through ToggleI2CPin".format(board_id, pin))
+                self._log.info(2, "Toggling bit [{}] on board [{}] through ToggleI2CPin".format(pin, board_id))
             else:
-                if VERBOSE > 1:
+                # print error message to the systemctl log file
+                if LOG_LEVEL > 1:
                     print("Error: Did not understand command [{}].".format(task))
-                self._log.info(2, "Error: Did not understand command [{}].".format(task))
+                self._log.error(2, "Error: Did not understand command [{}].".format(task))
 
         except Exception as err:
             error_string = traceback.format_exc()
-            if VERBOSE == 1:
+            # print error message to the systemctl log file
+            if LOG_LEVEL == 1:
                 print(error_string)
             if self._xmldata is not None:
                 self._xmldata.DeleteKey(board_id)
-            self._error_state += "Error when processing I2C command: {}. ".format(error_string)
-            self._log.error(1, "Error when processing I2C command: {}. ".format(error_string))
+            self._log.error(1, "Error when processing I2C command: {}.".format(error_string))
         return return_byte
-
-def InitBusAtBoot(the_log, xmldata, i2chandler):
-    """
-    If the program starts first time, pull the remembered boards from the config file. Set the proper input/output pin states to the last ones remembered.
-    """
-    # Mutex to make sure nobody else is messing with the I2C bus
-    #####self.i2chandler = i2cCommunication()
-
-    # Read the configured boards from the config file
-    the_log.info(2, "Reading board information from XML parameter file.")
-    boarddata = xmldata.get_all_boards
-    # Process boards one by one
-    for board in boarddata:
-        # Get the board ID (hex board number)
-        board_id = board.attrib["name"]
-        # Process both ports in the MCP23017 board (if configured both)
-        for port in board:
-            # Get Port A or B ID
-            port_id = port.attrib["name"]
-            if VERBOSE == 2:
-                print("Port [{}] of board [{}] should be set to [{}]".format(port_id, board_id, port.text))
-            the_log.info(2, "Port [{}] of board [{}] should be set to [{}]".format(port_id, board_id, port.text))
-            # Write the I/O state to the port
-            if not(i2chandler.WriteI2CDir(board_id, port_id, port.text)):
-                if VERBOSE == 2:
-                    print("That didn't work for board [{}]".format(board_id))
-                    the_log.info(2, "That didn't work for board [{}]".format(board_id))
-                # If that didn't work, the board may have been removed before booting. Remove it from the config file.
-                xmldata.DeleteKey(board_id)
 
 class i2cCommunication():
     """
@@ -431,6 +440,11 @@ class i2cCommunication():
     def __init__(self, the_log):
         # Copy logfile to local
         self._log = the_log
+        self._log.info(2, "Initializing I2C Communication class.")
+        # Create an empty set to be used for avoiding that multiple toggle commands can operate on the same pin
+        # A mutex is needed to manage the self._toggle_set in a unique way
+        self._toggle_set = set()
+        self._toggle_mutex = Lock()
         # Create a new I2C bus (port 1 of the Raspberry Pi)
         if DEMO_MODE_ONLY:
             self.i2cbus = 0
@@ -438,7 +452,7 @@ class i2cCommunication():
             self.i2cbus = SMBus(1)
             self._log.info(2, "Initializing SMBus 1 (I2C).")
         # Set up a Mutual Exclusive lock, such that parallel threads are not interfering with another thread writing on the I2C bus
-        self.i2cMutex = Lock()
+        self._i2cMutex = Lock()
         self._log.info(2, "Initialized I2C Mutex.")
         # Initialize the boards that are being handled.
         self.managedboards = []
@@ -463,7 +477,7 @@ class i2cCommunication():
         except:
             # Wait for the I2C bus to become free
             self._log.info(2, "Writing data [0x02] to IOCON register for board [0x{:0{}X}]".format(board_id, 2))
-            self.i2cMutex.acquire()
+            self._i2cMutex.acquire()
             try:
                 # Initialize configuration register of the new board
                 if DEMO_MODE_ONLY:
@@ -477,9 +491,83 @@ class i2cCommunication():
                 return_value = False
             finally:
                 # Free Mutex to avoid a deadlock situation
-                self.i2cMutex.release()
+                self._i2cMutex.release()
         if not(return_value):
             self._log.error(2, "Writing [0x02] to IOCON register for board [0x{:0{}X}] Failed !".format(board_id, 2))
+        return return_value
+
+    def ReadI2CDir(self, board_id, port_id):
+        """
+        Function for reading the full DIR Register value for a specific IO board.
+        """
+        # Verify in inputs are given as hex. Convert to int if so
+        if(isinstance(board_id,str)):
+            board_id = int(board_id, 16)
+        if(isinstance(port_id,str)):
+            port_id = int(port_id, 16)
+
+        # Verify if board used already, initialize if not
+        if self.CheckInitializeBoard(board_id):
+            return_value = -1
+
+            # Only start writing if the I2C bus is available
+            self._log.info(2, "Reading DIR port [0x{:0{}X}] on board [0x{:0{}X}]".format(port_id, 2, board_id, 2))
+            self._i2cMutex.acquire()
+            try:
+                # Read the current value of the DIR register
+                if DEMO_MODE_ONLY:
+                    print("SIMULATION : reading DIR port [0x{:0{}X}] on board [0x{:0{}X}]".format(port_id, 2, board_id, 2))
+                    return_value = 0xff
+                else:
+                    return_value = self.i2cbus.read_byte_data(board_id, port_id)
+            except:
+                # An error happened when accessing the new board, maybe non-existing on the bus
+                return_value = -1
+            finally:
+                # Free Mutex to avoid a deadlock situation
+                self._i2cMutex.release()
+        else:
+            return_value = -1
+        return return_value
+
+    def WriteI2CDir(self, board_id, port_id, newvalue):
+        """
+        Function for writing the full DIR Register value for a specific IO board
+        """
+        # Verify in inputs are given as hex. Convert to int if so
+        if(isinstance(board_id,str)):
+            board_id = int(board_id, 16)
+        if(isinstance(port_id,str)):
+            port_id = int(port_id, 16)
+        if(isinstance(newvalue,str)):
+            newvalue = int(newvalue, 16)
+
+        # Verify if board used already, initialize if not
+        if self.CheckInitializeBoard(board_id):
+            return_value = True
+
+            # Only start writing if the I2C bus is available
+            self._log.info(2, "Writing DIR port [0x{:0{}X}] on board [0x{:0{}X}] to new value [0x{:0{}X}]".format(port_id, 2, board_id, 2, newvalue, 2))
+            self._i2cMutex.acquire()
+            try:
+                if DEMO_MODE_ONLY:
+                    print("SIMULATION : writing DIR port [0x{:0{}X}] on board [0x{:0{}X}] to new value [0x{:0{}X}]".format(port_id, 2, board_id, 2, newvalue, 2))
+                    return_value = True
+                else:
+                    # Write the new value of the DIR register
+                    self.i2cbus.write_byte_data(board_id, port_id, newvalue)
+                    # Verify if the value is indeed accepted
+                    verification = self.i2cbus.read_byte_data(board_id, port_id)
+                    if verification != newvalue:
+                        return_value = False
+            except:
+                # An error happened when accessing the new board, maybe non-existing on the bus
+                return_value = False
+            finally:
+                # Free Mutex to avoid a deadlock situation
+                self._i2cMutex.release()
+        else:
+            return_value = False
         return return_value
 
     def GetI2CDirPin(self, board_id, pin_nr):
@@ -510,7 +598,7 @@ class i2cCommunication():
 
                 # Only start reading if the I2C bus is available
                 self._log.info(2, "Reading DIR pin from port [0x{:0{}X}] of board [0x{:0{}X}]".format(port_id, 2, board_id, 2))
-                self.i2cMutex.acquire()
+                self._i2cMutex.acquire()
                 try:
                     if DEMO_MODE_ONLY:
                         return_value = (1 << pin_nr)
@@ -526,14 +614,14 @@ class i2cCommunication():
                     return_value = -1
                 finally:
                     # Free Mutex to avoid a deadlock situation
-                    self.i2cMutex.release()
+                    self._i2cMutex.release()
             else:
                 return_value = -1
         return return_value
         
     def GetI2CDirRegister(self, board_id, reg_nr):
         """
-        Gets the current value of the DIR value of an pin on a board
+        Gets the current value of the DIR value of a pin on a board
         Pin number must be between 0 and 15
         """
         # Verify in inputs are given as hex. Convert to int if so
@@ -559,7 +647,7 @@ class i2cCommunication():
 
                 # Only start reading if the I2C bus is available
                 self._log.info(2, "Reading DIR register from port [0x{:0{}X}] of board [0x{:0{}X}]".format(port_id, 2, board_id, 2))
-                self.i2cMutex.acquire()
+                self._i2cMutex.acquire()
                 try:
                     if DEMO_MODE_ONLY:
                         return_value = 0xff
@@ -572,14 +660,14 @@ class i2cCommunication():
                     return_value = -1
                 finally:
                     # Free Mutex to avoid a deadlock situation
-                    self.i2cMutex.release()
+                    self._i2cMutex.release()
             else:
                 return_value = -1
         return return_value
         
     def SetI2CDirPin(self, board_id, pin_nr):
         """
-        Sets a pin to OUTPUT on a board
+        Sets a pin to INPUT on a board
         Pin number must be between 0 and 15
         """
         # Verify in inputs are given as hex. Convert to int if so
@@ -604,7 +692,7 @@ class i2cCommunication():
 
                 # Only start writing if the I2C bus is available
                 self._log.info(2, "Setting pin [0x{:0{}X}] to INPUT port [0x{:0{}X}] for board [0x{:0{}X}]".format(pin_nr, 2, port_id, 2, board_id,2))
-                self.i2cMutex.acquire()
+                self._i2cMutex.acquire()
                 try:
                     # Read the current state of the IODIR, then set ('OR') the one pin
                     if DEMO_MODE_ONLY:
@@ -618,14 +706,14 @@ class i2cCommunication():
                     return_value = False
                 finally:
                     # Free Mutex to avoid a deadlock situation
-                    self.i2cMutex.release()
+                    self._i2cMutex.release()
             else:
                 return_value = False
         return return_value
         
     def ClearI2CDirPin(self, board_id, pin_nr):
         """
-        Sets a pin to INPUT on a board
+        Sets a pin to OUTPUT on a board
         Pin number must be between 0 and 15
         """
         # Verify in inputs are given as hex. Convert to int if so
@@ -649,8 +737,8 @@ class i2cCommunication():
                     port_id = IODIRA
 
                 # Only start writing if the I2C bus is available
-                self._log.info(2, "Setting pin [0x{:0{}X}] to OUPUT on port [0x{:0{}X}] for board [0x{:0{}X}]".format(pin_nr, 2, port_id, 2, board_id,2))
-                self.i2cMutex.acquire()
+                self._log.info(2, "Setting pin [0x{:0{}X}] to OUTPUT on port [0x{:0{}X}] for board [0x{:0{}X}]".format(pin_nr, 2, port_id, 2, board_id,2))
+                self._i2cMutex.acquire()
                 try:
                     if DEMO_MODE_ONLY:
                         data_byte = (1 << pin_nr)
@@ -664,7 +752,7 @@ class i2cCommunication():
                     return_value = False
                 finally:
                     # Free Mutex to avoid a deadlock situation
-                    self.i2cMutex.release()
+                    self._i2cMutex.release()
             else:
                 return_value = False
         return return_value
@@ -698,7 +786,7 @@ class i2cCommunication():
 
                 # Only start reading if the I2C bus is available
                 self._log.info(2, "Reading pin [0x{:0{}X}] from port [0x{:0{}X}] of board [0x{:0{}X}]".format(pin_nr, 2, port_id, 2, board_id, 2))
-                self.i2cMutex.acquire()
+                self._i2cMutex.acquire()
                 try:
                     if DEMO_MODE_ONLY:
                         return_value = (1 << pin_nr)
@@ -714,7 +802,7 @@ class i2cCommunication():
                     return_value = -1
                 finally:
                     # Free Mutex to avoid a deadlock situation
-                    self.i2cMutex.release()
+                    self._i2cMutex.release()
             else:
                 return_value = -1
         return return_value
@@ -747,7 +835,7 @@ class i2cCommunication():
 
                 # Only start reading if the I2C bus is available
                 self._log.info(2, "Reading register [0x{:0{}X}], i.e. port [0x{:0{}X}] of board [0x{:0{}X}]".format(reg_nr, 2, port_id, 2, board_id, 2))
-                self.i2cMutex.acquire()
+                self._i2cMutex.acquire()
                 try:
                     if DEMO_MODE_ONLY:
                         return_value = 0xff
@@ -760,7 +848,7 @@ class i2cCommunication():
                     return_value = -1
                 finally:
                     # Free Mutex to avoid a deadlock situation
-                    self.i2cMutex.release()
+                    self._i2cMutex.release()
             else:
                 return_value = -1
         return return_value
@@ -794,7 +882,7 @@ class i2cCommunication():
 
                 # Only start writing if the I2C bus is available
                 self._log.info(2, "Setting pin [0x{:0{}X}] to HIGH on port [0x{:0{}X}] for board [0x{:0{}X}]".format(pin_nr, 2, port_id, 2, board_id, 2))
-                self.i2cMutex.acquire()
+                self._i2cMutex.acquire()
                 try:
                     if DEMO_MODE_ONLY:
                         data_byte = (1 << pin_nr)
@@ -808,7 +896,7 @@ class i2cCommunication():
                     return_value = False
                 finally:
                     # Free Mutex to avoid a deadlock situation
-                    self.i2cMutex.release()
+                    self._i2cMutex.release()
             else:
                 return_value = False
         return return_value
@@ -841,7 +929,7 @@ class i2cCommunication():
 
                 # Only start writing if the I2C bus is available
                 self._log.info(2, "Setting pin [0x{:0{}X}] to LOW on port [0x{:0{}X}] for board [0x{:0{}X}]".format(pin_nr, 2, port_id, 2, board_id, 2))
-                self.i2cMutex.acquire()
+                self._i2cMutex.acquire()
                 try:
                     if DEMO_MODE_ONLY:
                         data_byte = (1 << pin_nr)
@@ -855,15 +943,18 @@ class i2cCommunication():
                     return_value = False
                 finally:
                     # Free Mutex to avoid a deadlock situation
-                    self.i2cMutex.release()
+                    self._i2cMutex.release()
             else:
                 return_value = False
         return return_value
 
-    def ToggleI2CPin(self, board_id, pin_nr):
+    def ToggleI2CPin(self, board_id, pin_nr, acquire_state = False):
         """
         Toggles a bit on the board. If the pin is high, it will be momentarily set to low. If it is low, it will toggle to high.
-        Pin number must be between 0 and 15
+        Pin number must be between 0 and 15.
+        Per default it is expected that the pin is low in the "off" state and has to be toggled high, e.g. to trigger a momentary
+        switch. In some cases, the trigger is to the "other" side. acquire_state can be set to first assess the pin and briefly
+        toggle the pin to the other high/low state.
         """
         # Verify in inputs are given as hex. Convert to int if so
         if(isinstance(board_id,str)):
@@ -875,105 +966,82 @@ class i2cCommunication():
         if (pin_nr < 0) or (pin_nr > 15):
             return_value = False
         else:
-            # Verify if board used already, initialize if not
             return_value = True
-            if self.CheckInitializeBoard(board_id):
-                self._log.info(2, "Toggling pin [0x{:0{}X}] on board [0x{:0{}X}]".format(pin_nr, 2, board_id, 2))
-                current_state = self.GetI2CPin(board_id, pin_nr)
-                if (current_state == 0x0) or (current_state == 0x1):
-                    a_thread = Thread(target = self.PinToggler, args = [board_id, pin_nr, current_state], daemon = False)
-                    a_thread.start()
-                else:
-                    return_value = False
-            else:
-                return_value = False
+            # Toggling can take a long time, during which the server would not be able to process additional commands.
+            # To avoid that the server is frozen, toggles are processed in separate threads.
+            a_thread = Thread(target = self.PinToggler, args = [board_id, pin_nr], daemon = False)
+            a_thread.start()
         return return_value
     
-    def PinToggler(self, board_id, pin_nr, lowhigh_if_zero):
-        if lowhigh_if_zero == 0x0:
-            # Current state is low (0x0), and toggling needs to go to high briefly
-            self.SetI2CPin(board_id, pin_nr)
-            time.sleep(TOGGLEDELAY)
-            self.ClearI2CPin(board_id, pin_nr)
-        else: 
-            # Current state is high (0x1 or more), and toggling needs to go to low briefly
-            self.ClearI2CPin(board_id, pin_nr)
-            time.sleep(TOGGLEDELAY)
-            self.SetI2CPin(board_id, pin_nr)
-
-    def ReadI2CDir(self, board_id, port_id):
+    def WaitForPinToBeReleased(self, board_id, pin_nr, lock_if_free = False):
         """
-        Function for reading the full DIR Register value for a specific IO board
+        Toggling can take a long time, during which the server would not be able to process additional commands.
+        To avoid that the server is frozen, toggles are processed in separate threads. The boards being 
+        processed are maintained in the _toggle_set. As long as a thread has a toggle action going on, no other
+        actions are allowed on the specific board/pin combination. Therefore, all writes have to wait for the
+        pin to be freed up again.
         """
-        # Verify in inputs are given as hex. Convert to int if so
-        if(isinstance(board_id,str)):
-            board_id = int(board_id, 16)
-        if(isinstance(port_id,str)):
-            port_id = int(port_id, 16)
+        # The verification can not last longer than a TOGGLEDELAY. Keep track of the time, and time-out if necessary
+        checking_time = datetime.now()
+        keep_checking = True
+        while keep_checking:
+            # The _toggle_set is protected with a mutex to avoid that two threads are manipulating at the same
+            # moment, thus resulting in data errors.
+            acquired = self._toggle_mutex.acquire(blocking = True, timeout = COMMAND_TIMEOUT)
+            if acquired:
+                if (board_id, pin_nr) not in self._toggle_set:
+                    if lock_if_free:
+                        self._toggle_set.add((board_id, pin_nr))
+                    keep_checking = False
+                self._toggle_mutex.release()
+            if (datetime.now() - checking_time).total_seconds()  > max (COMMAND_TIMEOUT, TOGGLEDELAY):
+                keep_checking = False
+                raise "Time-out error trying to acquire pin {} on board {}".format(board_id, pin_nr)
 
-        # Verify if board used already, initialize if not
+    def PinToggler(self, board_id, pin_nr, acquire_state = False):
+        """
+        The PinToggler is a separate process, run in a thread. This allows the main loop to continue processing other read/write requests.
+        """
+        # First make sure to do the bookkeeping.
         if self.CheckInitializeBoard(board_id):
-            return_value = -1
+            Process_Toggle = False
 
-            # Only start writing if the I2C bus is available
-            self._log.info(2, "Reading DIR port [0x{:0{}X}] on board [0x{:0{}X}]".format(port_id, 2, board_id, 2))
-            self.i2cMutex.acquire()
             try:
-                # Read the current value of the DIR register
-                if DEMO_MODE_ONLY:
-                    print("SIMULATION : reading DIR port [0x{:0{}X}] on board [0x{:0{}X}]".format(port_id, 2, board_id, 2))
-                    return_value = 0xff
+                self.WaitForPinToBeReleased(board_id, pin_nr, True)
+                Process_Toggle = True
+            except Exception as err:
+                self._log.error(2, "Unable to toggle pin [0x{:0{}X}] on board [0x{:0{}X}]: Could not get pin free within [{}] seconds. Error Message: {}".format(pin_nr, 2, board_id, 2, COMMAND_TIMEOUT, err))
+                Process_Toggle = False
+
+            if Process_Toggle:
+                self._log.info(2, "Toggling pin [0x{:0{}X}] on board [0x{:0{}X}]".format(pin_nr, 2, board_id, 2))
+                # Default is that pin is toggled from low to high briefly.
+                # If 'acquire_state' is set, the current state is assessed, and switched briefly to the "other" high/low state.
+                if acquire_state:
+                    current_state = self.GetI2CPin(board_id, pin_nr)
                 else:
-                    return_value = self.i2cbus.read_byte_data(board_id, port_id)
-            except:
-                # An error happened when accessing the new board, maybe non-existing on the bus
-                return_value = -1
-            finally:
-                # Free Mutex to avoid a deadlock situation
-                self.i2cMutex.release()
+                    # Default is Low for current state and toggle to high to switch on e.g. a momentary switch.
+                    current_state = 0x0
+
+                if current_state == 0x0:
+                    # Current state is low (0x0), and toggling needs to go to high briefly
+                    self._log.info(2, "Toggling pin [0x{:0{}X}] on board [0x{:0{}X}] from LOW to HIGH".format(pin_nr, 2, board_id, 2))
+                    self.SetI2CPin(board_id, pin_nr)
+                    time.sleep(TOGGLEDELAY)
+                    self.ClearI2CPin(board_id, pin_nr)
+                    self._log.info(2, "Toggled pin [0x{:0{}X}] on board [0x{:0{}X}] back from HIGH to LOW".format(pin_nr, 2, board_id, 2))
+                if current_state == 0x1:
+                    # Current state is high (0x1 or more), and toggling needs to go to low briefly
+                    self._log.info(2, "Toggling pin [0x{:0{}X}] on board [0x{:0{}X}] from HIGH to LOW".format(pin_nr, 2, board_id, 2))
+                    self.ClearI2CPin(board_id, pin_nr)
+                    time.sleep(TOGGLEDELAY)
+                    self.SetI2CPin(board_id, pin_nr)
+                    self._log.info(2, "Toggled pin [0x{:0{}X}] on board [0x{:0{}X}] back from LOW to HIGH".format(pin_nr, 2, board_id, 2))
+                self._log.info(2, "Releasing (0x{:0{}X}, 0x{:0{}X}) from the Toggle set".format(board_id, 2, pin_nr, 2))
+                # Make sure to remove the board/pin pair from the _toggle_set at the end, or the pin will be blocked for all other processing
+                self._toggle_set.remove((board_id, pin_nr))
         else:
-            return_value = -1
-        return return_value
-
-    def WriteI2CDir(self, board_id, port_id, newvalue):
-        """
-        Function for writing the full DIR Register value for a specific IO board
-        """
-        # Verify in inputs are given as hex. Convert to int if so
-        if(isinstance(board_id,str)):
-            board_id = int(board_id, 16)
-        if(isinstance(port_id,str)):
-            port_id = int(port_id, 16)
-        if(isinstance(newvalue,str)):
-            newvalue = int(newvalue, 16)
-
-        # Verify if board used already, initialize if not
-        if self.CheckInitializeBoard(board_id):
-            return_value = True
-
-            # Only start writing if the I2C bus is available
-            self._log.info(2, "Writing DIR port [0x{:0{}X}] on board [0x{:0{}X}] to new value [0x{:0{}X}]".format(port_id, 2, board_id, 2, newvalue, 2))
-            self.i2cMutex.acquire()
-            try:
-                if DEMO_MODE_ONLY:
-                    print("SIMULATION : writing DIR port [0x{:0{}X}] on board [0x{:0{}X}] to new value [0x{:0{}X}]".format(port_id, 2, board_id, 2, newvalue, 2))
-                    return_value = True
-                else:
-                    # Write the new value of the DIR register
-                    self.i2cbus.write_byte_data(board_id, port_id, newvalue)
-                    # Verify if the value is indeed accepted
-                    verification = self.i2cbus.read_byte_data(board_id, port_id)
-                    if verification != newvalue:
-                        return_value = False
-            except:
-                # An error happened when accessing the new board, maybe non-existing on the bus
-                return_value = False
-            finally:
-                # Free Mutex to avoid a deadlock situation
-                self.i2cMutex.release()
-        else:
-            return_value = False
-        return return_value
+            self._log.error(2, "Toggling pin failed for [0x{:0{}X}] on board [0x{:0{}X}]: could not initialize board.".format(pin_nr, 2, board_id, 2))
 
     def BusIDBlinker(self, board_id = 0x20, num_flashes = 10):
         """
@@ -991,6 +1059,11 @@ class i2cCommunication():
 class xmlParameterHandler():
     """
     A class to handle an XML config file that keeps track of boards that were processed.
+    This XML Parameter Handler is used at boot time, so that the DIR pins of the different boards
+    are set to their last remembered state. I.e. inputs are set back to inputs and outputs are 
+    re-configured as outputs after the cold boot.
+    During the processing, the XML file is constantly updated when the DIR (input vs. output) of 
+    a pin changes.
     """
     def __init__(self, the_log, xml_file_name = ''):
         # Copy logfile to local
@@ -1192,7 +1265,7 @@ class xmlParameterHandler():
         if self._use_config_file:
             self._log.info(2, "Writing Config file. ")
             try:
-                xml_pretty_print(self._confdata[0])
+                self.xml_pretty_print(self._confdata[0])
                 outString = ET.tostring(self._confdata)
                 outFile = open(self._filename,"w")
                 outFile.write(outString.decode('ascii'))
@@ -1202,14 +1275,37 @@ class xmlParameterHandler():
                 return_value = False
                 # Disable further write attempts if the file cannot be written.
                 self._use_config_file = False
-                if VERBOSE > 0:
+                if LOG_LEVEL > 0:
                     print("Could not write parameter file [{}]. Error: {}".format(self._filename, err))
                 self._log.info("Could not write parameter file [{}]. Error: {}".format(self._filename, err))
         return return_value
 
+    def xml_pretty_print(self, element, level=0):
+        """
+        Format the XML data as properly indented items for better reading.
+        """
+        # Inspired by https://norwied.wordpress.com/2013/08/27/307/
+        # Kudos go to Norbert and Chris G. Sellers
+        padding = '  '
+        indent = "\n{}".format(padding * level)
+        if len(element):
+            if not element.text or not element.text.strip():
+                element.text = "{} ".format(indent)
+            if not element.tail or not element.tail.strip():
+                element.tail = indent
+            for elem in element:
+                self.xml_pretty_print(elem, level+1)
+            if not element.tail or not element.tail.strip():
+                element.tail = indent
+        else:
+            if level and (not element.tail or not element.tail.strip()):
+                element.tail = indent
+
 class LogThis():
     """
     A class for keeping track of the logging.
+    In case that logging is requested, errors are tracked in the log file if the level is > 0. At high verbosity (level >= 3),
+    all actions are logged for debugging purposes.
     """
     def __init__(self):
         # Set Logging details
@@ -1228,7 +1324,7 @@ class LogThis():
                 self.app_log.addHandler(self.my_handler)
             except Exception as err:
                 self._log_enabled = False
-                if VERBOSE > 0:
+                if LOG_LEVEL > 0:
                     print("Error while creating log file: {}. ".format(str(err)))
         else:
             self._log_enabled = False
@@ -1248,74 +1344,61 @@ class LogThis():
             if (LOG_LEVEL > 1) or (info_level == LOG_LEVEL):
                 self.app_log.error(info_text)
 
-def xml_pretty_print(element, level=0):
+def InitBusAtBoot(the_log, xmldata, i2chandler):
     """
-    Format the XML data as properly indented items for better reading.
+    If the program starts first time, pull the remembered boards from the XML config file. Set the proper input/output pin states to the last ones remembered.
     """
-    # Inspired by https://norwied.wordpress.com/2013/08/27/307/
-    # Kudos go to Norbert and Chris G. Sellers
-    padding = '  '
-    indent = "\n{}".format(padding * level)
-    if len(element):
-        if not element.text or not element.text.strip():
-            element.text = "{} ".format(indent)
-        if not element.tail or not element.tail.strip():
-            element.tail = indent
-        for elem in element:
-            xml_pretty_print(elem, level+1)
-        if not element.tail or not element.tail.strip():
-            element.tail = indent
-    else:
-        if level and (not element.tail or not element.tail.strip()):
-            element.tail = indent
+    # Read the configured boards from the config file
+    the_log.info(2, "Reading board information from XML parameter file.")
+    boarddata = xmldata.get_all_boards
+    # Process boards one by one
+    for board in boarddata:
+        # Get the board ID (hex board number)
+        board_id = board.attrib["name"]
+        # Process both ports in the MCP23017 board (if configured both)
+        for port in board:
+            # Get Port A or B ID
+            port_id = port.attrib["name"]
+            # print error message to the systemctl log file
+            if LOG_LEVEL == 2:
+                print("Port [{}] of board [{}] should be set to [{}]".format(port_id, board_id, port.text))
+            the_log.info(2, "Port [{}] of board [{}] should be set to [{}]".format(port_id, board_id, port.text))
+            # Write the I/O state to the port
+            if not(i2chandler.WriteI2CDir(board_id, port_id, port.text)):
+                if LOG_LEVEL == 2:
+                    print("That didn't work for board [{}]".format(board_id))
+                    the_log.info(2, "That didn't work for board [{}]".format(board_id))
+                # If that didn't work, the board may have been removed before booting. Remove it from the config file.
+                xmldata.DeleteKey(board_id)
 
 def main():
-    '''
-    Main program function
-    '''
-    # processcounter is used to determine when the program will send an info "alive" message
-    process_counter = 0
+    """
+    Main program function.
+    """
     # Start a logger and provide info
     my_log = LogThis()
-    my_log.info(1, "mcp23017control starting, running version [{}].".format(VERSION))
+    my_log.info(1, "mcp23017server starting, running version [{}].".format(VERSION))
     # Parameter file for board input/output configurations
     my_log.info(2, "Creating XML Parameter Handler")
     xmldata = xmlParameterHandler(my_log)
-    # Mutex to make sure nobody else is messing with the I2C bus
+    # Separate I2C handler, including a Mutex to make sure other clients are not messing with the I2C bus
     my_log.info(2, "Creating I2C Communication Handler")
     i2chandler = i2cCommunication(my_log)
-    # Initialize the I2C bus at first boot
+    # Initialize the I2C bus at first run (manual run), or at boot time (if set up as a service).
     my_log.info(2, "Initializing I2C devices")
     InitBusAtBoot(my_log, xmldata, i2chandler)
-    # Set up a new broker
+    # Set up a new broker - this is the main part of the software.
     my_log.info(2, "Creating a Message Broker")
     mybroker = mcp23017broker(my_log, i2chandler, xmldata)
-    # Create and start threads on the broker
-    my_log.info(2, "Setting up Threads")
-    mybroker.SetupThreads()
-    # IF no errors in the threads, wait here forever
-    my_error_state = ""
-    while (my_error_state == ""):
-        my_error_state = mybroker.error_state
-        if (datetime.now() - mybroker.watchdog_CommandReceiver).total_seconds()  > (WATCHDOG_TIMEOUT * RETRY_DELAY):
-            my_error_state += "CommandReceiver Thread stopped abnormally, unknown error. "
-            my_log.error(1, "CommandReceiver watchdog timed out. ")
-        else:
-            process_counter += 1
-            if (AM_ALIVE_TIMER > 0) and (process_counter > AM_ALIVE_TIMER):
-                process_counter = 0
-                my_log.info(2, "CommandReceiver thread alive and kicking")
-                if VERBOSE == 2:
-                    print("CommandReceiver thread alive and kicking. Last update: {} seconds ago.".format((datetime.now() - mybroker.watchdog_CommandReceiver).total_seconds()))
-
-        time.sleep(1)
-    my_log.error(1, "FATAL error: {}".format(my_error_state))
-    raise Exception(my_error_state)
+    # Process commands forever
+    while True:
+        mybroker.service_commands()
+    my_log.error(1, "FATAL EXIT WITH ERROR [{}]".format(my_error_state))
+    # Do a controlled exist with fail code. Trigger the OS to restart the service if configured.
+    sys.exit(1)
 
 if __name__ == "__main__":
     """
     Entry point when program is called from the command line.
     """
     main()
-
-
