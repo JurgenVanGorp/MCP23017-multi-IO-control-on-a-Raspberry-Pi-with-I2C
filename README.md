@@ -33,12 +33,20 @@ Other useful references are the following.
 * This checklist has been created on a Raspberry Pi Model 3 B+. Expectedly it works on other Model 3 versions and on the RPi 4.
 * Please mind that this instruction was written on 30-Oct-2021. Time changes, and so do software versions.
 * It is assumed that you already have an MCP23017 connected to the RPi. This is **not really** necesssary, but will make testing and debugging a lot easier.
-* It is also assumed that you are connecting to the RPi with SSH, e.g. with [WinSCP](https://winscp.net/)
+* It is also assumed that you are connecting to the RPi with SSH, e.g. with [PuTTY](https://www.putty.org/)
 * You need to have I2C configured on the RPi. If you haven't done that yet, [you can following this Adafruit guideline](https://learn.adafruit.com/adafruits-raspberry-pi-lesson-4-gpio-setup/configuring-i2c).
 
-## Configuring and testing the I2C bus
+## 1. Configuring and testing the I2C bus
 
-Log on to the RPi with SSH and install i2c tools.
+The easiest way to enable I2C is with raspi-config:
+
+```
+sudo raspi-config
+```
+
+Then enable I2C in the *Interface Options* section.
+
+To test the I2C connection, connect at least one MCP23017 device to the Rpi. Log on to the RPi with SSH and install i2c tools.
 
 ```
 sudo apt install i2c-tools -y
@@ -64,61 +72,194 @@ You should see something like this.
 70: -- -- -- -- -- -- -- --
 ```
 
-In this **example** seven MCP23017 devices were connected on the I2C bus. A first group was configured with the address bits set to 000, 001 and 010. A second group was configured with the binary bits set to 100, 101, 110 and 111. On the I2C bus this reads as resp. 0x20, 0x21, 0x22 and 0x24, 0x25, 0x26, 0x27.
+In this **example** seven MCP23017 devices were connected on the I2C bus. A first group was configured with the address bits set to 000, 001 and 010. A second group was configured with the binary bits set to 100, 101, 110 and 111. On the I2C bus this reads as resp. 0x20, 0x21, 0x22 and 0x24, 0x25, 0x26, 0x27. 
 
-## Install smbus
-
-**Info**: this software assumes you have the latest Python installed. You may want to [follow this guide](https://github.com/JurgenVanGorp/Home-Assistant-on-Raspberry-Pi-Native) to install the latest version of Python3.
-
-The software in this repository is written in Python 3, and makes use of smbus. Install smbus as follows.
+If you have connected only one MCP23017, you will probably only see something like.
 
 ```
-sudo apt install python3-smbus
-sudo python3 -m pip install smbus
-sudo python3 -m pip install smbus2
-pip3 install RPI.GPIO
-pip3 install adafruit-blinka sudo apt-get install python-smbus python3-smbus python-dev python3-dev i2c-tools
+     0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f
+00:          -- -- -- -- -- -- -- -- -- -- -- -- --
+10: -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
+20: 20 -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
+30: -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
+40: -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
+50: -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
+60: -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
+70: -- -- -- -- -- -- -- --
 ```
 
-Configure the I2C parameters to be compatible with the MCP23017.
+If you're not seeing anything on the bus, you can try limiting the bus speed, and explicitly set the configuration. Edit the config.txt file as follows.
 
 ```
 sudo nano /boot/config.txt
 ```
 
-... and update the baudrate to e.g.
+Then go down the lines with *dtparam=i2c_*. In that section update, or add the following:
 
-```python
+```
+# Enable I2C bus number 1, disable I2C bus 0
+dtparam=i2c_vc=off
+dtparam=i2c_arm=on
+# Switch off the spi and i2s communication buses
+dtparam=spi=off
+dtparam=i2s=off
+# Set the baudrate on the I2C bus
 dtparam=i2c_baudrate=400000
-```
-
-Then configure the core frequency in the config file with.
-
-```
-sudo nano /boot/config.txt
-```
-
-Add the following line.
-
-```
+# Stabilize the frequency on Raspb B and B+
 core_freq=250
 ```
 
-## IMPORTANT: install the redis database
-
-
+Finalize the new settings with rebooting, and test the i2cdetect again.
 
 ```
+sudo reboot
+```
+
+## 2. Install and test the Redis database
+
+Let's start again with a :
+
+```
+sudo apt update -y
+sudo apt upgrade -y
+```
+
+Then install Redis and its components.
+
+```
+sudo apt install libhiredis0.14 liblua5.1-0 lua-bitop lua-cjson redis-server redis-tools ruby-redis -y
+```
+
+Redis should work already in this stage. Test it with the command:
+
+```
+redis-cli ping
+```
+
+which should result in a simple reply:
+
+```
+PONG
+```
+
+We now need to make Redis available for python3 too. Do this with:
+
+```
+python3 -m pip install redis
+```
+
+Let's test if Redis now works in python. Let's first create a test file with:
+
+```
+nano redistest.py
+```
+
+In that file enter the following little program, which will perform the same type of ping test.
+
+```python
+import redis
+
+try:
+  r = redis.StrictRedis(host='localhost', port=6379, db=0)
+  try:
+    r.ping()
+    print("Successfully pinged redis.")
+  except (redis.exceptions.ConnectionError, ConnectionRefusedError):
+    print("Redis connection error.")
+except:
+  print("Could not create redis object.")
+```
+
+Save with Ctrl-S and exit with Ctrl-X. Now test redis with.
+
+```
+python3 redistest.py
+```
+
+**IMPORTANT**: If you [installed HomeAssistant in the previous step](https://github.com/JurgenVanGorp/Home-Assistant-on-Raspberry-Pi-Native), you will need to install redis for python also in the Home Assistant virtual environment as follows.
+
+```
+cd /srv/homeassistant/
+sudo -u homeassistant -H -s
+cd /srv/homeassistant/
+source bin/activate
+python3 -m pip install redis
+exit
+```
+
+Just before the *exit* you can create the same *redistest.py* file and redo the test, if you like.
+
+## 3. Install the mcp23017server Software and Service
+
+The MCP23017server program makes use of e.g. smbus for the I2C communication. So, let's first add the library.
+
+```
+sudo apt install python3-smbus -y
+```
+
+Under the assumption that you have logged on with the *pi* account, your home folder would be */home/pi*. Let's create a separate (hidden) folder for the MCP23017 server, and download the necessary server files.
+
+```
+mkdir /home/pi/.mcp23017server
+cd /home/pi/.mcp23017server
+wget -L https://raw.githubusercontent.com/JurgenVanGorp/MCP23017-multi-IO-control-on-a-Raspberry-Pi-with-I2C/main/mcp23017control/mcp23017server.py
+sudo chmod +x mcp23017server.py
+```
+
+To make the service start at boot time, create a service for starting the MCP23017server automatically.
+
+```
+sudo nano /etc/systemd/system/mcp23017server.service
+```
+
+In this file, enter the following lines.
+
+```
+[Unit]
+Description=MCP23017 Server
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart= /usr/bin/python3 /home/pi/.mcp23017server/mcp23017server.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Save with Ctrl-S and exit with Ctrl-X. Then enable, start and verify the service with:
+
+```
+sudo systemctl daemon-reload
+sudo systemctl enable mcp23017server.service
+sudo systemctl start mcp23017server.service
+sudo reboot
+
+sudo systemctl status mcp23017server.service
+```
+
+If all goes well, you should see something like
+
+```javascript
+● mcp23017server.service - MCP23017 Server
+   Loaded: loaded (/etc/systemd/system/mcp23017server.service; enabled; vendor preset: enabled)
+   Active: active (running) since Thu 2021-11-04 21:25:05 CET; 11min ago
+ Main PID: 521 (python3)
+    Tasks: 1 (limit: 2059)
+   CGroup: /system.slice/mcp23017server.service
+           └─521 /usr/bin/python3 /home/pi/.mcp23017server/mcp23017server.py
+
+Nov 04 21:25:05 HA-Garage systemd[1]: Started MCP23017 Server.
 ```
 
 
+If you don't see this, look carefully at the error messages, and take appropriate action. If all looks well, reboot the RPi and verify the service again.
 
 ```
+sudo reboot
 ```
 
-
-
-
-
-
-Next topic: [Step 5: Controlling the MCP23017 from within Home-Assistant.](https://github.com/JurgenVanGorp/Step5-MCP23017-multi-I-O-Control-with-Raspberry-Pi-and-Home-Assistant)
+Next topic: [Step 4: Controlling the MCP23017 from within Home-Assistant.](https://github.com/JurgenVanGorp/MCP23017-multi-I-O-Control-with-Raspberry-Pi-and-Home-Assistant)
