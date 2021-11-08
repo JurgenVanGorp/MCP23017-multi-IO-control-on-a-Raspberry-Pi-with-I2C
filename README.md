@@ -1,4 +1,3 @@
-# DRAFT - DO NOT USE YET
 Guide creation date: 30-Oct-2021
 
 # MCP23017 multi I/O Control on a Raspberry Pi With I2C
