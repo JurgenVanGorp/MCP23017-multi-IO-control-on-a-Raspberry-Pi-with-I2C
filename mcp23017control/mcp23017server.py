@@ -48,6 +48,8 @@ DEMO_MODE_ONLY = False
 # Acceptable Commands for controlling the I2C bus
 # These are the commands you need to use to control the DIR register of the MCP23017, or
 # for setting and clearing pins.
+
+FINDBOARD = "IDENTIFY"        # Identify Board number, return 1 if found on the I2C bus
 GETDIRBIT = "GETDBIT"         # Read the specific IO pin dir value (1 = output)
 GETDIRREGISTER = "GETDIRREG"  # Read the full DIR register (low:1 or high:2)
 SETDIRBIT = "SETDBIT"         # Set DIR pin to INPUT (1)
@@ -314,10 +316,10 @@ class mcp23017broker():
                     else:
                         the_value = int(the_value, 10)
                 # Describe what we are expecting on the bus.
-                set_expectation = "Error: first command must be one of the following {}, {}, {}, {}, {}, {}, {}, {}, {}. ".format(GETDIRBIT, GETDIRREGISTER, SETDIRBIT, CLEARDIRBIT, GETIOPIN, GETIOREGISTER, SETDATAPIN, CLEARDATAPIN, TOGGLEPIN)
+                set_expectation = "Error: first command must be one of the following {}, {}, {}, {}, {}, {}, {}, {}, {}, {}. ".format(FINDBOARD, GETDIRBIT, GETDIRREGISTER, SETDIRBIT, CLEARDIRBIT, GETIOPIN, GETIOREGISTER, SETDATAPIN, CLEARDATAPIN, TOGGLEPIN)
                 # Using a try here, because the command could also be very, very dirty.
                 try:
-                    if the_command not in {GETIOPIN, SETDIRBIT, CLEARDIRBIT, GETDIRBIT, SETDATAPIN, CLEARDATAPIN, GETIOREGISTER, GETDIRREGISTER, TOGGLEPIN}:
+                    if the_command not in {FINDBOARD, GETIOPIN, SETDIRBIT, CLEARDIRBIT, GETDIRBIT, SETDATAPIN, CLEARDATAPIN, GETIOREGISTER, GETDIRREGISTER, TOGGLEPIN}:
                         self._return_error += set_expectation
                         self._log.info(2, set_expectation)
                 except:
@@ -377,6 +379,9 @@ class mcp23017broker():
                 self._i2chandler.WaitForPinToBeReleased(board_id, pin, False)
                 return_byte = '0x{:0{}X}'.format(self._i2chandler.GetI2CDirPin(board_id, pin),2)
                 self._log.info(2, "Received byte [{}] from pin [{}] on board [{}] through GetI2CDirPin".format(return_byte, pin, board_id))
+            elif task == FINDBOARD:
+                return_byte = '0x{:0{}X}'.format(self._i2chandler.IdentifyBoard(board_id),2)
+                self._log.info(2, "Received byte [{}] from board [{}] through IdentifyBoard".format(return_byte, board_id))
             elif task == GETDIRREGISTER:
                 self._i2chandler.WaitForPinToBeReleased(board_id, pin, False)
                 return_byte = '0x{:0{}X}'.format(self._i2chandler.GetI2CDirRegister(board_id, pin),2)
@@ -569,6 +574,43 @@ class i2cCommunication():
         else:
             return_value = False
         return return_value
+
+    def IdentifyBoard(self, board_id):
+        """
+        Identifies if board exists on the I2C bus.
+        """
+        # Verify in inputs are given as hex. Convert to int if so
+        if(isinstance(board_id,str)):
+            board_id = int(board_id, 16)
+
+        # Verify if board used already, initialize if not
+        if self.CheckInitializeBoard(board_id):
+            return_value = 1
+
+            # Pin values up to 0x0f go to GPIOA, higher values go to GPIOB
+            pin_nr = 1  # pick random pin number to be read from the board. We are not going to use it anyway.
+            port_id = IODIRA
+
+            # Only start reading if the I2C bus is available
+            self._log.info(2, "Reading DIR pin from port [0x{:0{}X}] of board [0x{:0{}X}]".format(port_id, 2, board_id, 2))
+            self.i2cMutex.acquire()
+            try:
+                if DEMO_MODE_ONLY:
+                    return_value = (1 << pin_nr)
+                    print("SIMULATION : reading DIR pin [0x{:0{}X}] from port [0x{:0{}X}] of board [0x{:0{}X}]".format(return_value, 2, port_id, 2, board_id, 2))
+                else:
+                    # Read the current state of the IO register, then set ('OR') the one pin
+                    _ = self.i2cbus.read_byte_data(board_id, port_id) & (1 << pin_nr)
+                    return_value = 1
+            except:
+                # An error happened when accessing the new board, maybe non-existing on the bus
+                return_value = 0
+            finally:
+                # Free Mutex to avoid a deadlock situation
+                self.i2cMutex.release()
+        else:
+            return_value = 0
+        return return_value        
 
     def GetI2CDirPin(self, board_id, pin_nr):
         """
