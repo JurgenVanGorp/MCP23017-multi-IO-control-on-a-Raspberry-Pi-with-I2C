@@ -380,6 +380,7 @@ class mcp23017broker():
                 return_byte = '0x{:0{}X}'.format(self._i2chandler.GetI2CDirPin(board_id, pin),2)
                 self._log.info(2, "Received byte [{}] from pin [{}] on board [{}] through GetI2CDirPin".format(return_byte, pin, board_id))
             elif task == FINDBOARD:
+                self._i2chandler.WaitForPinToBeReleased(board_id, pin, False)
                 return_byte = '0x{:0{}X}'.format(self._i2chandler.IdentifyBoard(board_id),2)
                 self._log.info(2, "Received byte [{}] from board [{}] through IdentifyBoard".format(return_byte, board_id))
             elif task == GETDIRREGISTER:
@@ -593,7 +594,7 @@ class i2cCommunication():
 
             # Only start reading if the I2C bus is available
             self._log.info(2, "Reading DIR pin from port [0x{:0{}X}] of board [0x{:0{}X}]".format(port_id, 2, board_id, 2))
-            self.i2cMutex.acquire()
+            #self.i2cMutex.acquire()
             try:
                 if DEMO_MODE_ONLY:
                     return_value = (1 << pin_nr)
@@ -605,9 +606,9 @@ class i2cCommunication():
             except:
                 # An error happened when accessing the new board, maybe non-existing on the bus
                 return_value = 0
-            finally:
-                # Free Mutex to avoid a deadlock situation
-                self.i2cMutex.release()
+            #finally:
+            #    # Free Mutex to avoid a deadlock situation
+            #    self.i2cMutex.release()
         else:
             return_value = 0
         return return_value        
