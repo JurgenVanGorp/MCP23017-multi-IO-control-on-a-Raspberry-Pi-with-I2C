@@ -254,11 +254,35 @@ If all goes well, you should see something like
 Nov 04 21:25:05 HA-Garage systemd[1]: Started MCP23017 Server.
 ```
 
-
 If you don't see this, look carefully at the error messages, and take appropriate action. If all looks well, reboot the RPi and verify the service again.
 
 ```
 sudo reboot
 ```
+
+## 4. Quick check if the server is working
+
+Before moving on to Home-Assistant, it would be good to verify already if the server part is responding.
+
+The mcp23017monitor.py program can be used for this purpose. Is is a command-line program, with an ASCII art interface that still allows clicking the pins with the mouse.
+
+To download the program, enter the following commands (under the assumption that you are working under the /home/pi directory).
+
+```
+cd /home/pi
+wget -L https://raw.githubusercontent.com/JurgenVanGorp/MCP23017-multi-IO-control-on-a-Raspberry-Pi-with-I2C/main/mcp23017control/mcp23017monitor.py
+python3 mcp23017monitor.py
+```
+
+You will (should) get a screen looking as follows.
+![alt text](https://github.com/JurgenVanGorp/MCP23017-multi-IO-control-on-a-Raspberry-Pi-with-I2C/blob/main/mcp23017control/mcp23017monitor.png "Example monitor view.")
+
+Steps to take for the verification:
+* Check the "MCP23017 Board found on I2C" lines, and verify if your board was found on the I2C bus.
+* If needed: click on the [0] address bits A0, A1 and A2 so that they match the board you want to monitor.
+* The current state of the MCP23017 is shown, e.g. which pins are [IN]put, and which ones are [OUT]put.
+* Click [IN] or [OUT] to change the direction of a pin.
+* Click [0] or [1] to change the output state of a pin. Do mind this only works for output pins. You will see that Input pins are not shown between brackets, i.e. cannot be clicked.
+
 
 Next topic: [Step 4: Controlling the MCP23017 from within Home-Assistant.](https://github.com/JurgenVanGorp/MCP23017-multi-I-O-Control-with-Raspberry-Pi-and-Home-Assistant)

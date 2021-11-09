@@ -1,9 +1,11 @@
-from os import system, name
+import sys
 from time import sleep
 import redis
 import curses
 from curses import wrapper
 from datetime import datetime
+
+VERSION = "1.00"
 
 # Communications between Clients and the server happen through a Redis in-memory database
 # so to limit the number of writes on the (SSD or microSD) storage. For larger implementations
@@ -460,17 +462,18 @@ def WrappedDraw(stdscr):
     stdscr.addstr(DELTA_Y + 28, DELTA_X, '              N/C <=+ 14         15 +=> A0       ')
     stdscr.addstr(DELTA_Y + 29, DELTA_X, '                    +---------------+  ')
     stdscr.addstr(DELTA_Y + 30,  DELTA_X, '')
-    # Draw the graphical dynamic part.
 
+    # Draw the graphical dynamic part.
+    mcp.ScanPins()
+    mcp.DrawPins(stdscr)
     stdscr.refresh()
+
+    sleep(0.1)
     stdscr.nodelay(1)
     mcp.key = stdscr.getch()
-    sleep(0.1)
     if mcp.key == curses.KEY_MOUSE:
       _, mx, my, _, _ = curses.getmouse()
       mcp.ProcessMouseClick(stdscr, mx, my)
-    mcp.ScanPins()
-    mcp.DrawPins(stdscr)
 
 def main():
   wrapper(WrappedDraw)

@@ -16,6 +16,8 @@ from datetime import datetime
 from smbus2 import SMBus
 from threading import Thread, Lock
 
+VERSION = "1.00"
+
 ###
 ### USER EDITABLE CONSTANTS #####################################################################
 ###
