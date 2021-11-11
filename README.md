@@ -275,6 +275,7 @@ python3 mcp23017monitor.py
 ```
 
 You will (should) get a screen looking as follows.
+
 ![alt text](https://github.com/JurgenVanGorp/MCP23017-multi-IO-control-on-a-Raspberry-Pi-with-I2C/blob/main/mcp23017control/mcp23017monitor.png "Example monitor view.")
 
 Steps to take for the verification:
