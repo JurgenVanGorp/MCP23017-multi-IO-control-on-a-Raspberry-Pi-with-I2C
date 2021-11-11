@@ -284,5 +284,184 @@ Steps to take for the verification:
 * Click [IN] or [OUT] to change the direction of a pin.
 * Click [0] or [1] to change the output state of a pin. Do mind this only works for output pins. You will see that Input pins are not shown between brackets, i.e. cannot be clicked.
 
+## 5. Using the software in your own (Python) programs
+
+From the mcp23017monitory.py file, copy the "CommandsBroker" class into your own Python program. Don't forget to also copy the constants in the beginning of the file.
+
+Start the broker with 
+
+```python
+myBroker = CommandsBroker()
+if myBroker.RedisDBInitialized:
+  print("Message broker started and Redis database ready.")
+else:
+  print("ERROR RECEIVED: {}".format(myBroker.errormessage))
+```
+
+There are two routines that you should use:
+* _SendCommand_(whichCommand, board_id, pin_id) sends a command to the board with ID board_ID (0x20 through 0x27) and pin_id (0x0 through 0xF), and forgets about it. The command is put on the command queue and sent to the MCP23017 when the I2C bus is available.
+* _ProcessCommand_(whichCommand, board_id, pin_id) first calls _SendCommand_ and then waits for a return to come back through the _WaitForReturn_ routine.
+
+The following commands can be used.
+
+### IDENTIFY
+
+Identifies if an MCP23017 board is present on the I2C bus.
+
+```python
+board_id = 0x00
+retval = myBroker.ProcessCommand("IDENTIFY", board_id)
+```
+
+Inputs:
+* board_id : 0x20 through 0x2F
+Output:
+* retval = 1 if the MCP23017 with ID board_id was found on the I2C
+* retval = 0 if not found, or when there was an error.
+
+### GETDBIT
+
+Reads the value of the DIR register (Input or Output) for a specific pin.
+
+```python
+board_id = 0x00
+pin_id = 0x00
+retval = myBroker.ProcessCommand("GETDBIT", board_id, pin_id)
+```
+
+Inputs:
+* board_id : 0x20 through 0x2F
+* pin_id: 0x00 through 0x0F
+Output:
+* retval = 1 if the pin is an INPUT
+* retval = 0 if the pin is an OUTPUT
+
+### GETDIRREG
+
+Reads the value of one of the two DIR registers of the MCP23017. If reg_id = 0, then the IODIRA register (pins A0 to A7) is returned as a byte. If reg_id = 1, then the IODIRB register (pins B0 to B7) is returned. 
+
+The IODIR registers are a single byte, where the bit is 0 if a pin is an output, and the bit is 1 if the pin is an input.
+
+```python
+board_id = 0x00
+reg_id = 1
+retval = myBroker.ProcessCommand("GETDIRREG", board_id, reg_id)
+```
+
+Inputs:
+* board_id : 0x20 through 0x2F
+* reg_id: 0 or 1
+Output:
+* retval = IODIRA as a byte, but with value 0x0 through 0xF if reg_id = 0
+* retval = IODIRB as a byte, but with value 0x0 through 0xF if reg_id = 1
+
+### GETIOREG
+
+Reads the value of one of the two IO registers of the MCP23017. If reg_id = 0, then the GPIOA register (pins A0 to A7) is returned as a byte. If reg_id = 1, then the GPIOB register (pins B0 to B7) is returned. 
+
+The GPIO registers are a single byte, where the bit is 0 if a pin state is Low, and the bit is 1 if the pin state is High.
+
+```python
+board_id = 0x00
+reg_id = 1
+retval = myBroker.ProcessCommand("GETIOREG", board_id, reg_id)
+```
+
+Inputs:
+* board_id : 0x20 through 0x2F
+* reg_id: 0 or 1
+Output:
+* retval = GPIOA as a byte, but with value 0x0 through 0xF if reg_id = 0
+* retval = GPIOB as a byte, but with value 0x0 through 0xF if reg_id = 1
+
+### SETDBIT
+
+Sets the DIR value of a single pin in the DIR register to INPUT.
+
+```python
+board_id = 0x00
+pin_id = 0x00
+retval = myBroker.ProcessCommand("SETDBIT", board_id, pin_id)
+```
+
+Inputs:
+* board_id : 0x20 through 0x2F
+* pin_id: 0x00 through 0x0F
+Output:
+* retval = True if no error was received.
+* retval = False if en error occured, e.g. when the wrong board_id or pin_id was given.
+
+### CLRDBIT
+
+Sets the DIR value of a single pin in the DIR register to OUTPUT.
+
+```python
+board_id = 0x00
+pin_id = 0x00
+retval = myBroker.ProcessCommand("CLRDBIT", board_id, pin_id)
+```
+
+Inputs:
+* board_id : 0x20 through 0x2F
+* pin_id: 0x00 through 0x0F
+Output:
+* retval = True if no error was received.
+* retval = False if en error occured, e.g. when the wrong board_id or pin_id was given.
+
+
+### GETPIN
+
+Gets the pin value of one single pin of a given MCP23017 board. 
+Remark that this command can be used for pins that are either set to input or to output.
+
+```python
+board_id = 0x00
+pin_id = 0x00
+retval = myBroker.ProcessCommand("GETPIN", board_id, pin_id)
+```
+
+Inputs:
+* board_id : 0x20 through 0x2F
+* pin_id: 0x00 through 0x0F
+Output:
+* retval = 1 if the pin value is High.
+* retval = 1 if the pin value is Low.
+
+
+### SETPIN
+
+Sets the pin of one single pin of a given MCP23017 board to state High.
+
+```python
+board_id = 0x00
+pin_id = 0x00
+retval = myBroker.ProcessCommand("SETPIN", board_id, pin_id)
+```
+
+Inputs:
+* board_id : 0x20 through 0x2F
+* pin_id: 0x00 through 0x0F
+Output:
+* retval = True if no error was received.
+* retval = False if en error occured, e.g. when the wrong board_id or pin_id was given.
+
+
+### CLRPIN
+
+Sets the pin of one single pin of a given MCP23017 board to state Low.
+
+```python
+board_id = 0x00
+pin_id = 0x00
+retval = myBroker.ProcessCommand("CLRPIN", board_id, pin_id)
+```
+
+Inputs:
+* board_id : 0x20 through 0x2F
+* pin_id: 0x00 through 0x0F
+Output:
+* retval = True if no error was received.
+* retval = False if en error occured, e.g. when the wrong board_id or pin_id was given.
+
 
 Next topic: [Step 4: Controlling the MCP23017 from within Home-Assistant.](https://github.com/JurgenVanGorp/MCP23017-multi-I-O-Control-with-Raspberry-Pi-and-Home-Assistant)

@@ -25,7 +25,7 @@ DELTA_Y = 12
 # for setting and clearing pins.
 
 FINDBOARD = "IDENTIFY"        # Identify Board number, return 1 if found on the I2C bus
-GETDIRBIT = "GETDBIT"         # Read the specific IO pin dir value (1 = output)
+GETDIRBIT = "GETDBIT"         # Read the specific IO pin dir value (1 = input)
 GETDIRREGISTER = "GETDIRREG"  # Read the full DIR register (low:1 or high:2)
 SETDIRBIT = "SETDBIT"         # Set DIR pin to INPUT (1)
 CLEARDIRBIT = "CLRDBIT"       # Clear DIR pin command to OUTPUT (0)
@@ -67,7 +67,8 @@ class CommandsBroker:
     # The Responses table is then formatted as (all fields are TEXT, even if formatted as "0xff" !!)
     # id, command_id TEXT, datavalue TEXT, response TEXT
     self._responses = None
-    if (self.OpenAndVerifyDatabase() == ""):
+    self.errormessage = self.OpenAndVerifyDatabase()
+    if (self.errormessage == ""):
       self.RedisDBInitialized = True
     else:
       self.RedisDBInitialized = False
@@ -123,7 +124,7 @@ class CommandsBroker:
       # We got here, so return zero error message.
       return ""
 
-  def SendCommand(self, whichCommand, board_id, pin_id):
+  def SendCommand(self, whichCommand, board_id, pin_id = 0x00):
       """
       Send a new command to the mcp23017server through a Redis database record.
       The commands will get a time-out, to avoid that e.g. a button pushed now, is only processed hours later.
@@ -172,7 +173,7 @@ class CommandsBroker:
               answer = (0x00, "Time-out error trying to get result from server for Command ID {}".format(command_id))
       return answer
 
-  def ProcessCommand(self, whichCommand, board_id, pin_id):
+  def ProcessCommand(self, whichCommand, board_id, pin_id = 0x00):
       """
       The ProcessCommand function is a combination of sending the Command to the mcp23017server host, and 
       waiting for the respone back.
@@ -353,7 +354,6 @@ class mcp23017:
   
   def BoardIsOnI2C(self, board_id):
       retval = rdb.ProcessCommand("IDENTIFY", board_id, 0x00)
-      return retval
       # Verify in inputs are given as hex. Convert to int if so
       if(isinstance(retval,str)):
           retval = int(retval, 16)

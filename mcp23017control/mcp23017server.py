@@ -52,7 +52,7 @@ DEMO_MODE_ONLY = False
 # for setting and clearing pins.
 
 FINDBOARD = "IDENTIFY"        # Identify Board number, return 1 if found on the I2C bus
-GETDIRBIT = "GETDBIT"         # Read the specific IO pin dir value (1 = output)
+GETDIRBIT = "GETDBIT"         # Read the specific IO pin dir value (1 = input)
 GETDIRREGISTER = "GETDIRREG"  # Read the full DIR register (low:1 or high:2)
 SETDIRBIT = "SETDBIT"         # Set DIR pin to INPUT (1)
 CLEARDIRBIT = "CLRDBIT"       # Clear DIR pin command to OUTPUT (0)
