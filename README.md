@@ -1,6 +1,6 @@
 Guide creation date: 30-Oct-2021
 
-# MCP23017 multi I/O Control on a Raspberry Pi With I2C
+# STEP 3: MCP23017 multi I/O Control on a Raspberry Pi With I2C
 This is a Raspberry Pi driver for controlling a MCP23017 I/O chip over I2C.
 
 Previous topic: [Step 2: Setting up Home Assistant native on the Raspberry Pi.](https://github.com/JurgenVanGorp/Step3-Home-Assistant-on-Raspberry-Pi-Native)
